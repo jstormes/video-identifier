@@ -1,0 +1,105 @@
+# Video Identifier - Docker Compose Configuration
+#
+# Automated pipeline for identifying DVD/Blu-ray video content via subtitle
+# extraction, LLM analysis, and IMDB database lookup.
+#
+# Usage:
+#   # Process a single disc directory
+#   docker compose run --rm video-identifier /source/MY_DISC
+#
+#   # Process with debug logging
+#   DEBUG=true docker compose run --rm video-identifier /source/MY_DISC
+#
+#   # Build the image
+#   docker compose build
+#
+# Required:
+#   - Set IMDB_PASSWORD in .env file or environment
+#   - Ensure LLM server is accessible
+#   - Ensure IMDB database is accessible
+#
+# Output Structure:
+#   /output/Movies/  - Movie content (Jellyfin Movies library)
+#   /output/Shows/   - TV show content (Jellyfin Shows library)
+
+services:
+  video-identifier:
+    build: .
+    container_name: video-identifier
+    volumes:
+      # Input: Directory containing disc folders with MKV files
+      - ${SOURCE_PATH:-/ripped_discs/video}:/source:rw
+      # Output: Jellyfin-compatible media library (Movies/ and Shows/ subdirs)
+      - ${OUTPUT_PATH:-/media}:/output
+    environment:
+      # LLM Configuration
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://nas2:8191/v1}
+      - LLM_MODEL=${LLM_MODEL:-qwen3-30b}
+      # Database Configuration
+      - IMDB_HOST=${IMDB_HOST:-nas2}
+      - IMDB_USER=${IMDB_USER:-imdb}
+      - IMDB_PASSWORD=${IMDB_PASSWORD:?IMDB_PASSWORD is required}
+      - IMDB_DATABASE=${IMDB_DATABASE:-imdb}
+      # Output Configuration
+      - OUTPUT_DIR=/output
+      # Pipeline Configuration
+      - DISC_NAME=${DISC_NAME:-}
+      - DEBUG=${DEBUG:-false}
+    extra_hosts:
+      # Add host entries if LLM/DB servers need hostname resolution
+      - "nas2:${NAS2_IP:-192.168.12.209}"
+    # No restart - runs once per disc
+    restart: "no"
+
+  # Watcher service - monitors for new discs and processes them
+  video-identifier-watcher:
+    build: .
+    container_name: video-identifier-watcher
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Video Identifier Watcher Started"
+        echo "Watching: /source"
+        echo "Output: /output"
+        echo "Check interval: $${WATCH_INTERVAL:-300}s"
+
+        while true; do
+          for disc_dir in /source/*/; do
+            [ -d "$$disc_dir" ] || continue
+
+            # Skip if already processed or currently processing
+            [ -f "$${disc_dir}OUTPUT_COMPLETE.txt" ] && continue
+            [ -f "$${disc_dir}UNKNOWN.txt" ] && continue
+            [ -f "$${disc_dir}pipeline_status.json" ] && continue
+
+            # Check if disc has MKV files
+            if ls "$${disc_dir}"*.mkv 1>/dev/null 2>&1; then
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] Processing: $$disc_dir"
+              /app/orchestrator.sh "$$disc_dir"
+            fi
+          done
+
+          sleep $${WATCH_INTERVAL:-300}
+        done
+    volumes:
+      - ${SOURCE_PATH:-/ripped_discs/video}:/source:rw
+      - ${OUTPUT_PATH:-/media}:/output
+    environment:
+      # LLM Configuration
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://nas2:8191/v1}
+      - LLM_MODEL=${LLM_MODEL:-qwen3-30b}
+      # Database Configuration
+      - IMDB_HOST=${IMDB_HOST:-nas2}
+      - IMDB_USER=${IMDB_USER:-imdb}
+      - IMDB_PASSWORD=${IMDB_PASSWORD:?IMDB_PASSWORD is required}
+      - IMDB_DATABASE=${IMDB_DATABASE:-imdb}
+      # Output Configuration
+      - OUTPUT_DIR=/output
+      # Watcher Configuration
+      - WATCH_INTERVAL=${WATCH_INTERVAL:-300}
+      - DEBUG=${DEBUG:-false}
+    extra_hosts:
+      - "nas2:${NAS2_IP:-192.168.12.209}"
+    restart: unless-stopped
+    profiles:
+      - watcher
